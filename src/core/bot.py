@@ -118,9 +118,11 @@ class CustomerServiceBot:
         self.application.add_handler(CommandHandler("broadcast", self.handle_broadcast))
         self.application.add_handler(CommandHandler("settings", self.handle_settings))
 
-        # 消息处理器
+        # 消息处理器 - 处理所有非系统命令的消息
+        # 只排除机器人自己处理的命令，其他命令（如搜索指令）也会转发
+        system_commands = ["start", "help", "status", "contact", "stats", "sessions", "reply", "broadcast", "settings"]
         self.application.add_handler(MessageHandler(
-            filters.ALL & ~filters.COMMAND,
+            filters.ALL,
             self.handle_message
         ))
 
@@ -147,8 +149,12 @@ class CustomerServiceBot:
         else:
             text = (
                 f"👋 您好 {user.first_name}！\n\n"
-                f"{self.config.business.welcome_message}\n\n"
-                "您可以直接发送消息，我们会尽快回复您。"
+                "暂时支持的搜索指令：\n\n"
+                "- 群组目录 /topchat\n"
+                "- 群组搜索 /search\n"
+                "- 按消息文本搜索 /text\n"
+                "- 按名称搜索 /human\n\n"
+                "您可以使用以上指令进行搜索，或直接发送消息联系客服。"
             )
 
             # 通知管理员
@@ -219,7 +225,8 @@ class CustomerServiceBot:
                         "• /reply <用户ID> <消息> 回复指定用户"
                     )
             else:
-                # 客户消息 - 转发给管理员
+                # 客户消息 - 转发给管理员（包括搜索指令）
+                # 处理所有客户消息，包括 /topchat, /search, /text, /human 等指令
                 await self.forward_customer_message(update, context)
 
         except Exception as e:
