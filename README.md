@@ -1,10 +1,10 @@
-# Telegram Customer Service Bot 🤖
+# Telegram 整合机器人 - NewBot925 🤖
 
 [![Python Version](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Telegram Bot API](https://img.shields.io/badge/Telegram%20Bot%20API-Latest-blue)](https://core.telegram.org/bots/api)
 
-一个功能强大、模块化、生产级别的 Telegram 客服中转机器人系统。专为需要将客户消息转发给管理员处理的场景设计。
+一个功能强大的Telegram机器人，集成了客服系统和搜索镜像功能。
 
 ## ✨ 核心功能
 

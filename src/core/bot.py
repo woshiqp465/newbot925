@@ -70,6 +70,7 @@ class CustomerServiceBot:
                 self.db_manager = DatabaseManager(self.config)
                 await self.db_manager.initialize()
 
+
             self.logger.info("Bot initialization completed")
 
         except Exception as e:
@@ -118,9 +119,8 @@ class CustomerServiceBot:
         self.application.add_handler(CommandHandler("broadcast", self.handle_broadcast))
         self.application.add_handler(CommandHandler("settings", self.handle_settings))
 
-        # 消息处理器 - 处理所有非系统命令的消息
+        # 消息处理器 - 处理所有消息（包括搜索指令）
         # 只排除机器人自己处理的命令，其他命令（如搜索指令）也会转发
-        system_commands = ["start", "help", "status", "contact", "stats", "sessions", "reply", "broadcast", "settings"]
         self.application.add_handler(MessageHandler(
             filters.ALL,
             self.handle_message
