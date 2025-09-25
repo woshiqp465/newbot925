@@ -1,0 +1,69 @@
+========================================
+快速部署指南 - 在虚拟机上运行机器人
+========================================
+
+第一步：连接到虚拟机
+----------------------
+ssh atai@192.168.9.159
+密码: wengewudi666808
+
+第二步：一键部署（复制粘贴以下命令）
+------------------------------------
+wget -O deploy.sh https://raw.githubusercontent.com/woshiqp465/newbot925/main/deploy.sh && chmod +x deploy.sh && ./deploy.sh
+
+或者手动执行：
+------------------------------------
+# 1. 克隆项目
+git clone https://github.com/woshiqp465/newbot925.git
+cd newbot925
+
+# 2. 安装依赖
+pip3 install -r requirements.txt
+
+# 3. 配置环境变量
+cp .env.example .env
+nano .env
+# 编辑以下内容：
+# BOT_TOKEN=8426529617:AAHAxzohSMFBAxInzbAVJsZfkB5bHnOyFC4
+# ADMIN_ID=7363537082
+
+# 4. 复制session文件（从本地电脑）
+# 在本地电脑执行：
+scp mirror_session.session* atai@192.168.9.159:~/newbot925/
+
+# 5. 使用screen运行（保持后台运行）
+screen -S telegram_bot
+python3 integrated_bot.py
+
+# 按 Ctrl+A 然后按 D 退出screen（程序继续运行）
+
+第三步：管理机器人
+------------------
+# 查看运行状态
+screen -r telegram_bot
+
+# 查看所有screen会话
+screen -ls
+
+# 停止机器人
+screen -X -S telegram_bot quit
+
+# 重新启动
+screen -dmS telegram_bot python3 integrated_bot.py
+
+========================================
+优点说明：
+========================================
+✅ 24/7运行：虚拟机一直开着，机器人不会停
+✅ 独立运行：不占用你的电脑资源
+✅ 远程管理：随时SSH连接查看状态
+✅ 自动重连：screen会保持进程运行
+✅ 断线续传：即使SSH断开，程序继续运行
+
+========================================
+注意事项：
+========================================
+1. 确保虚拟机有Python 3.9+
+2. 确保虚拟机能访问Telegram API
+3. session文件需要从本地复制过去
+4. 定期检查运行状态
