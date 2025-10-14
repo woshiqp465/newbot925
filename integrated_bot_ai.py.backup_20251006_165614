@@ -1,0 +1,561 @@
+#!/usr/bin/env python3
+"""
+整合版客服机器人 - AI增强版
+包含：
+1. AI对话引导
+2. 镜像搜索功能
+3. 自动翻页缓存
+4. 智能去重
+"""
+
+import asyncio
+import logging
+import time
+import os
+import httpx
+import json
+import sys
+from typing import Dict, Optional
+from datetime import datetime
+
+# 添加路径
+sys.path.insert(0, "/home/atai/bot_data")
+
+# Pyrogram imports
+from pyrogram import Client as PyrogramClient, filters
+from pyrogram.types import Message as PyrogramMessage
+from pyrogram.raw.functions.messages import GetBotCallbackAnswer
+
+# Telegram Bot imports
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters as tg_filters
+from telegram.ext import ContextTypes
+
+# 导入数据库
+try:
+    from database import CacheDatabase
+except ImportError:
+    CacheDatabase = None
+    logging.warning("database.py未找到，缓存功能将禁用")
+
+# ================== 配置 ==================
+API_ID = 24660516
+API_HASH = "eae564578880a59c9963916ff1bbbd3a"
+SESSION_NAME = "user_session"
+BOT_TOKEN = "8426529617:AAHAxzohSMFBAxInzbAVJsZfkB5bHnOyFC4"
+TARGET_BOT = "@openaiw_bot"
+ADMIN_ID = 7363537082
+
+# AI服务配置
+MAC_API_URL = "http://192.168.9.10:8000"
+
+# 搜索命令列表
+SEARCH_COMMANDS = ['/topchat', '/search', '/text', '/human']
+
+# 日志配置
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+class IntegratedBotAI:
+    """整合的客服机器人 - AI增强版"""
+
+    def __init__(self):
+        # Bot应用
+        self.app = None
+
+        # Pyrogram客户端（用于镜像）
+        self.pyrogram_client: Optional[PyrogramClient] = None
+        self.target_bot_id: Optional[int] = None
+
+        # 消息映射
+        self.pyrogram_to_telegram = {}
+        self.telegram_to_pyrogram = {}
+        self.callback_data_map = {}
+        self.user_search_sessions = {}
+
+        # AI会话状态
+        self.user_ai_sessions = {}
+
+        # 缓存数据库
+        self.cache_db = CacheDatabase() if CacheDatabase else None
+
+    async def setup_pyrogram(self):
+        """设置Pyrogram客户端"""
+        try:
+            proxy_config = None
+            if os.environ.get('ALL_PROXY'):
+                proxy_url = os.environ.get('ALL_PROXY', '').replace('socks5://', '')
+                if proxy_url:
+                    host, port = proxy_url.split(':')
+                    proxy_config = {"scheme": "socks5", "hostname": host, "port": int(port)}
+
+            self.pyrogram_client = PyrogramClient(
+                SESSION_NAME, api_id=API_ID, api_hash=API_HASH,
+                proxy=proxy_config if proxy_config else None
+            )
+
+            await self.pyrogram_client.start()
+            logger.info("✅ Pyrogram客户端已启动")
+
+            target = await self.pyrogram_client.get_users(TARGET_BOT)
+            self.target_bot_id = target.id
+            logger.info(f"✅ 已连接到搜索机器人: {target.username}")
+
+            @self.pyrogram_client.on_message(filters.user(self.target_bot_id))
+            async def on_bot_response(_, message: PyrogramMessage):
+                await self.handle_search_response(message)
+
+            @self.pyrogram_client.on_edited_message(filters.user(self.target_bot_id))
+            async def on_message_edited(_, message: PyrogramMessage):
+                await self.handle_search_response(message, is_edit=True)
+
+            return True
+        except Exception as e:
+            logger.error(f"Pyrogram设置失败: {e}")
+            return False
+
+    async def call_ai_service(self, user_id: int, message: str, context: dict = None) -> dict:
+        """调用Mac AI服务 - 带重试和降级"""
+        # 尝试3次
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    response = await client.post(
+                        f"{MAC_API_URL}/ai/chat",
+                        json={"user_id": user_id, "message": message, "context": context or {}}
+                    )
+                    if response.status_code == 200:
+                        logger.info(f"✅ AI服务响应成功 (尝试{attempt+1}/3)")
+                        return response.json()
+                    else:
+                        logger.warning(f"AI服务返回错误: {response.status_code} (尝试{attempt+1}/3)")
+            except asyncio.TimeoutError:
+                logger.warning(f"AI服务超时 (尝试{attempt+1}/3)")
+                if attempt < 2:
+                    await asyncio.sleep(0.5)
+                    continue
+            except Exception as e:
+                logger.warning(f"AI服务连接失败: {e} (尝试{attempt+1}/3)")
+                if attempt < 2:
+                    await asyncio.sleep(0.5)
+                    continue
+
+        # 降级：返回简单的自动回复
+        logger.error("AI服务不可用，使用降级模式")
+        return {
+            "type": "auto",
+            "response": "👋 请直接发送搜索关键词，或使用以下命令：\n\n• /search [关键词] - 搜索群组名称\n• /text [关键词] - 搜索消息内容\n• /topchat - 热门分类",
+            "confidence": 0.5
+        }
+
+    async def handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """处理/start命令 - AI引导模式"""
+        user = update.effective_user
+        user_id = user.id
+
+        self.user_ai_sessions[user_id] = {"started_at": datetime.now(), "conversation": []}
+
+        welcome_text = (
+            f"👋 您好 {user.first_name}！\n\n"
+            "我是智能搜索助手，可以帮您找到Telegram上的群组和频道。\n\n"
+            "🔍 我能做什么：\n"
+            "• 搜索群组/频道\n"
+            "• 搜索特定话题的讨论\n"
+            "• 查找用户\n"
+            "• 浏览热门分类\n\n"
+            "💬 直接告诉我您想找什么，我会帮您选择最合适的搜索方式！"
+        )
+
+        keyboard = [
+            [InlineKeyboardButton("🔍 搜索群组", callback_data="quick_search"),
+             InlineKeyboardButton("📚 使用指南", callback_data="quick_help")],
+            [InlineKeyboardButton("🔥 热门分类", callback_data="quick_topchat")]
+        ]
+
+        await update.message.reply_text(welcome_text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+        # 通知管理员
+        admin_notification = (
+            f"🆕 新用户访问 (AI模式):\n"
+            f"👤 {user.first_name} {user.last_name or ''}\n"
+            f"🆔 {user.id}\n"
+            f"👤 @{user.username or '无'}\n"
+            f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        await context.bot.send_message(chat_id=ADMIN_ID, text=admin_notification)
+
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """处理所有消息 - AI智能路由"""
+        if not update.message or not update.message.text:
+            return
+
+        user = update.effective_user
+        user_id = user.id
+        text = update.message.text
+        is_admin = user_id == ADMIN_ID
+
+        if is_admin and update.message.reply_to_message:
+            await self.handle_admin_reply(update, context)
+            return
+
+        if self.is_search_command(text):
+            await self.handle_search_command(update, context)
+            return
+
+        await self.handle_ai_conversation(update, context)
+
+    def is_search_command(self, text: str) -> bool:
+        """检查是否是搜索命令"""
+        return text and text.split()[0] in SEARCH_COMMANDS
+
+    async def handle_ai_conversation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """AI对话处理"""
+        user = update.effective_user
+        user_id = user.id
+        message = update.message.text
+
+        # 构建上下文信息
+        user_context = {
+            "username": user.username or f"{user.first_name}_{user.id}",
+            "first_name": user.first_name,
+            "last_name": user.last_name
+        }
+
+        ai_response = await self.call_ai_service(user_id, message, user_context)
+
+        if ai_response.get("type") == "auto":
+            response_text = ai_response.get("response", "")
+            suggested_cmd = ai_response.get("suggested_command")
+            keywords = ai_response.get("keywords")
+
+            if suggested_cmd and keywords:
+                keyboard = [
+                    [InlineKeyboardButton(
+                        f"✅ 开始搜索: {suggested_cmd} {keywords}",
+                        callback_data=f"exec_{suggested_cmd.replace('/', '')}_{keywords}"[:64]
+                    )],
+                    [InlineKeyboardButton("✏️ 修改关键词", callback_data="modify_keywords")]
+                ]
+                await update.message.reply_text(response_text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+                self.user_ai_sessions[user_id] = {
+                    "suggested_command": suggested_cmd,
+                    "keywords": keywords,
+                    "original_message": message
+                }
+            else:
+                await update.message.reply_text(response_text)
+        else:
+            response_text = ai_response.get("response", "抱歉，我没有理解您的需求。")
+            await update.message.reply_text(response_text)
+
+    async def handle_search_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """处理搜索命令 - 带缓存"""
+        user = update.effective_user
+        user_id = user.id
+        command = update.message.text
+
+        # 提取命令和关键词
+        parts = command.split(maxsplit=1)
+        cmd = parts[0]
+        keyword = parts[1] if len(parts) > 1 else ""
+
+        # 检查缓存
+        if self.cache_db and keyword:
+            cached = self.cache_db.get_cache(cmd, keyword, 1)
+            if cached:
+                logger.info(f"返回缓存结果: {cmd} {keyword}")
+                await update.message.reply_text(
+                    f"📦 从缓存返回结果：\n\n{cached['text'][:4000]}",
+                    parse_mode='HTML'
+                )
+                return
+
+        # 通知管理员
+        admin_notification = (
+            f"🔍 用户执行搜索:\n"
+            f"👤 {user.first_name} {user.last_name or ''}\n"
+            f"🆔 {user_id}\n"
+            f"📝 {command}\n"
+            f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        await context.bot.send_message(chat_id=ADMIN_ID, text=admin_notification)
+
+        wait_msg = await update.message.reply_text("🔍 正在搜索，请稍候...")
+
+        self.user_search_sessions[user_id] = {
+            'chat_id': update.effective_chat.id,
+            'wait_msg_id': wait_msg.message_id,
+            'command': cmd,
+            'keyword': keyword,
+            'timestamp': datetime.now()
+        }
+
+        await self.pyrogram_client.send_message(self.target_bot_id, command)
+        logger.info(f"搜索: {command}")
+
+    async def handle_search_response(self, message: PyrogramMessage, is_edit: bool = False):
+        """处理搜索机器人的响应 - 保存到缓存"""
+        try:
+            if not self.user_search_sessions:
+                return
+
+            user_id = max(self.user_search_sessions.keys(), key=lambda k: self.user_search_sessions[k]['timestamp'])
+            session = self.user_search_sessions[user_id]
+
+            text = message.text or message.caption or "无结果"
+
+            try:
+                if message.text and hasattr(message.text, 'html'):
+                    text = message.text.html
+            except:
+                pass
+
+            keyboard = self.convert_keyboard(message)
+
+            if is_edit and message.id in self.pyrogram_to_telegram:
+                telegram_msg_id = self.pyrogram_to_telegram[message.id]
+                await self.app.bot.edit_message_text(
+                    chat_id=session['chat_id'],
+                    message_id=telegram_msg_id,
+                    text=text[:4000],
+                    reply_markup=keyboard,
+                    parse_mode='HTML'
+                )
+            else:
+                try:
+                    await self.app.bot.delete_message(
+                        chat_id=session['chat_id'],
+                        message_id=session['wait_msg_id']
+                    )
+                except:
+                    pass
+
+                sent = await self.app.bot.send_message(
+                    chat_id=session['chat_id'],
+                    text=text[:4000],
+                    reply_markup=keyboard,
+                    parse_mode='HTML'
+                )
+
+                self.pyrogram_to_telegram[message.id] = sent.message_id
+                self.telegram_to_pyrogram[sent.message_id] = message.id
+
+                # 保存到缓存
+                if self.cache_db and session.get('keyword'):
+                    buttons = self.extract_buttons(message)
+                    self.cache_db.save_cache(
+                        session['command'],
+                        session['keyword'],
+                        1,  # 第一页
+                        text,
+                        text,
+                        buttons
+                    )
+
+        except Exception as e:
+            logger.error(f"处理搜索响应失败: {e}")
+
+    def convert_keyboard(self, message: PyrogramMessage) -> Optional[InlineKeyboardMarkup]:
+        """转换键盘"""
+        if not message.reply_markup or not message.reply_markup.inline_keyboard:
+            return None
+
+        try:
+            buttons = []
+            for row in message.reply_markup.inline_keyboard:
+                button_row = []
+                for btn in row:
+                    if btn.url:
+                        button_row.append(InlineKeyboardButton(text=btn.text, url=btn.url))
+                    elif btn.callback_data:
+                        callback_id = f"cb_{time.time():.0f}_{len(self.callback_data_map)}"
+                        self.callback_data_map[callback_id] = (message.id, btn.callback_data)
+                        button_row.append(InlineKeyboardButton(text=btn.text, callback_data=callback_id[:64]))
+
+                if button_row:
+                    buttons.append(button_row)
+
+            return InlineKeyboardMarkup(buttons) if buttons else None
+        except Exception as e:
+            logger.error(f"键盘转换失败: {e}")
+            return None
+
+    def extract_buttons(self, message: PyrogramMessage) -> list:
+        """提取按钮数据"""
+        if not message.reply_markup or not message.reply_markup.inline_keyboard:
+            return []
+
+        buttons = []
+        for row in message.reply_markup.inline_keyboard:
+            for btn in row:
+                buttons.append({"text": btn.text, "url": btn.url if btn.url else None})
+        return buttons
+
+    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """处理回调查询"""
+        query = update.callback_query
+        data = query.data
+
+        await query.answer()
+
+        if data == "quick_search":
+            await query.message.reply_text("请告诉我您想搜索什么内容")
+            return
+        elif data == "quick_help":
+            await query.message.reply_text(
+                "📖 使用指南：\n\n"
+                "• /search [关键词] - 按群组名称搜索\n"
+                "• /text [关键词] - 按消息内容搜索\n"
+                "• /human [关键词] - 按用户名搜索\n"
+                "• /topchat - 热门群组目录"
+            )
+            return
+        elif data == "quick_topchat":
+            # 创建假update来执行搜索
+            from types import SimpleNamespace
+            fake_update = SimpleNamespace(
+                effective_user=query.from_user,
+                effective_chat=query.message.chat,
+                message=SimpleNamespace(text='/topchat')
+            )
+            await self.handle_search_command(fake_update, context)
+            return
+        elif data.startswith("exec_"):
+            parts = data.replace("exec_", "").split("_", 1)
+            if len(parts) == 2:
+                command, keywords = parts
+                search_text = f"/{command} {keywords}"
+                from types import SimpleNamespace
+                fake_update = SimpleNamespace(
+                    effective_user=query.from_user,
+                    effective_chat=query.message.chat,
+                    message=SimpleNamespace(text=search_text)
+                )
+                await self.handle_search_command(fake_update, context)
+            return
+
+        # 翻页callback
+        if data in self.callback_data_map:
+            pyrogram_msg_id, original_callback = self.callback_data_map[data]
+            try:
+                if not isinstance(original_callback, bytes):
+                    original_callback = original_callback.encode() if original_callback else b''
+
+                await self.pyrogram_client.invoke(
+                    GetBotCallbackAnswer(
+                        peer=await self.pyrogram_client.resolve_peer(self.target_bot_id),
+                        msg_id=pyrogram_msg_id,
+                        data=original_callback
+                    )
+                )
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.error(f"Callback处理失败: {e}")
+
+    async def handle_admin_reply(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """处理管理员回复"""
+        reply_to = update.message.reply_to_message
+        if not reply_to or not reply_to.text:
+            return
+
+        import re
+        user_id = None
+        for line in reply_to.text.split('\n'):
+            if '🆔' in line or 'ID:' in line:
+                numbers = re.findall(r'\d+', line)
+                if numbers:
+                    user_id = int(numbers[0])
+                    break
+
+        if not user_id:
+            await update.message.reply_text("❌ 无法识别用户ID")
+            return
+
+        try:
+            await context.bot.send_message(chat_id=user_id, text=update.message.text)
+            await update.message.reply_text(f"✅ 已回复给用户 {user_id}")
+        except Exception as e:
+            await update.message.reply_text(f"❌ 回复失败: {str(e)}")
+
+    async def initialize(self):
+        """初始化机器人"""
+        try:
+            logger.info("正在初始化整合机器人...")
+
+            if not await self.setup_pyrogram():
+                logger.error("Pyrogram初始化失败")
+                return False
+
+            builder = Application.builder().token(BOT_TOKEN)
+
+            if os.environ.get('HTTP_PROXY'):
+                proxy_url = os.environ.get('HTTP_PROXY')
+                logger.info(f"配置Telegram Bot代理: {proxy_url}")
+                request = httpx.AsyncClient(proxies={"http://": proxy_url, "https://": proxy_url}, timeout=30.0)
+                builder = builder.request(request)
+
+            self.app = builder.build()
+
+            self.app.add_handler(CommandHandler("start", self.handle_start))
+            self.app.add_handler(CallbackQueryHandler(self.handle_callback))
+            self.app.add_handler(MessageHandler(tg_filters.ALL, self.handle_message))
+
+            logger.info("✅ 整合机器人初始化完成")
+            return True
+
+        except Exception as e:
+            logger.error(f"初始化失败: {e}")
+            return False
+
+    async def run(self):
+        """运行机器人"""
+        try:
+            await self.app.initialize()
+            await self.app.start()
+            await self.app.updater.start_polling(drop_pending_updates=True)
+
+            logger.info("="*50)
+            logger.info("✅ AI增强版Bot已启动")
+            logger.info(f"AI服务: {MAC_API_URL}")
+            logger.info(f"缓存功能: {'启用' if self.cache_db else '禁用'}")
+            logger.info("="*50)
+
+            await asyncio.Event().wait()
+
+        except KeyboardInterrupt:
+            logger.info("收到停止信号")
+        finally:
+            await self.cleanup()
+
+    async def cleanup(self):
+        """清理资源"""
+        logger.info("正在清理...")
+
+        if self.app:
+            await self.app.updater.stop()
+            await self.app.stop()
+            await self.app.shutdown()
+
+        if self.pyrogram_client:
+            await self.pyrogram_client.stop()
+
+        logger.info("✅ 清理完成")
+
+
+async def main():
+    """主函数"""
+    bot = IntegratedBotAI()
+
+    if await bot.initialize():
+        await bot.run()
+    else:
+        logger.error("初始化失败，退出")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

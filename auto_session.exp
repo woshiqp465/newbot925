@@ -1,0 +1,30 @@
+#\!/usr/bin/expect
+set timeout 30
+
+spawn python3 -c "
+from pyrogram import Client
+proxy = {
+    'scheme': 'socks5',
+    'hostname': '127.0.0.1',
+    'port': 1080
+}
+app = Client('user_session', api_id=24660516, api_hash='eae564578880a59c9963916ff1bbbd3a', proxy=proxy)
+app.start()
+me = app.get_me()
+print(f'Session created for: {me.first_name}')
+app.stop()
+"
+
+expect "Enter phone number or bot token:"
+send "+66621394851\r"
+
+expect "Is \"+66621394851\" correct? (y/N):"
+send "y\r"
+
+expect "Enter confirmation code:"
+send "77194\r"
+
+expect "Is \"77194\" correct? (y/N):"
+send "y\r"
+
+expect eof

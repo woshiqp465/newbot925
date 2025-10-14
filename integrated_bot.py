@@ -7,6 +7,8 @@
 import asyncio
 import logging
 import time
+import os
+import httpx
 from typing import Dict, Optional
 from datetime import datetime
 
@@ -20,14 +22,12 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters as tg_filters
 from telegram.ext import ContextTypes
 
-# 项目imports
-from src.config.settings import Settings
-from src.core.bot import CustomerServiceBot
+# 移除src依赖，使用环境变量
 
 # ================== 配置 ==================
 API_ID = 24660516
 API_HASH = "eae564578880a59c9963916ff1bbbd3a"
-SESSION_NAME = "mirror_session"
+SESSION_NAME = "user_session"
 BOT_TOKEN = "8426529617:AAHAxzohSMFBAxInzbAVJsZfkB5bHnOyFC4"
 TARGET_BOT = "@openaiw_bot"
 ADMIN_ID = 7363537082
@@ -47,8 +47,7 @@ class IntegratedBot:
     """整合的客服机器人 - 包含镜像搜索功能"""
 
     def __init__(self):
-        # 加载配置
-        self.config = Settings.from_env()
+        # 直接使用常量配置，不依赖Settings类
 
         # Bot应用
         self.app = None
@@ -66,10 +65,24 @@ class IntegratedBot:
     async def setup_pyrogram(self):
         """设置Pyrogram客户端用于镜像"""
         try:
+            # 检查是否需要使用代理
+            proxy_config = None
+            if os.environ.get('ALL_PROXY'):
+                proxy_url = os.environ.get('ALL_PROXY', '').replace('socks5://', '')
+                if proxy_url:
+                    host, port = proxy_url.split(':')
+                    proxy_config = {
+                        "scheme": "socks5",
+                        "hostname": host,
+                        "port": int(port)
+                    }
+                    logger.info(f"使用代理: {host}:{port}")
+
             self.pyrogram_client = PyrogramClient(
                 SESSION_NAME,
                 api_id=API_ID,
-                api_hash=API_HASH
+                api_hash=API_HASH,
+                proxy=proxy_config if proxy_config else None
             )
 
             await self.pyrogram_client.start()
@@ -413,8 +426,24 @@ class IntegratedBot:
                 logger.error("Pyrogram初始化失败")
                 return False
 
-            # 创建Bot应用
-            self.app = Application.builder().token(BOT_TOKEN).build()
+            # 创建Bot应用，配置代理
+            builder = Application.builder().token(BOT_TOKEN)
+
+            # 如果设置了代理环境变量，配置httpx客户端
+            if os.environ.get('HTTP_PROXY'):
+                proxy_url = os.environ.get('HTTP_PROXY')
+                logger.info(f"配置Telegram Bot代理: {proxy_url}")
+                # 创建自定义httpx客户端
+                request = httpx.AsyncClient(
+                    proxies={
+                        "http://": proxy_url,
+                        "https://": proxy_url,
+                    },
+                    timeout=30.0
+                )
+                builder = builder.request(request)
+
+            self.app = builder.build()
 
             # 注册处理器
             self.app.add_handler(CommandHandler("start", self.handle_start))
